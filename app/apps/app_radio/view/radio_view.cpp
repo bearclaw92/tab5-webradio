@@ -44,6 +44,8 @@ void RadioView::init()
     _root->setBorderWidth(0);
     _root->setRadius(0);
     _root->setScrollbarMode(LV_SCROLLBAR_MODE_OFF);
+    // Disable scrolling on root to prevent layout issues
+    lv_obj_clear_flag(_root->get(), LV_OBJ_FLAG_SCROLLABLE);
 
     // Build UI components
     create_wifi_status();
@@ -112,10 +114,12 @@ void RadioView::create_wifi_status()
 
 void RadioView::create_now_playing_card()
 {
-    // Main card
+    // Main card - sized for 1280x720 landscape display
+    // Layout: WiFi status (top-right), Now Playing card (top-center),
+    //         Station grid (middle), Transport controls (bottom)
     _now_playing_card = std::make_unique<Container>(_root->get());
-    _now_playing_card->align(LV_ALIGN_TOP_MID, 0, 60);
-    _now_playing_card->setSize(900, 280);
+    _now_playing_card->align(LV_ALIGN_TOP_MID, 0, 50);
+    _now_playing_card->setSize(1000, 200);  // Wider, shorter
     _now_playing_card->setBgColor(lv_color_hex(colors::BG_SECONDARY));
     _now_playing_card->setRadius(16);
     _now_playing_card->setBorderWidth(2);
@@ -123,24 +127,24 @@ void RadioView::create_now_playing_card()
 
     // Station name (large)
     _station_name_label = std::make_unique<Label>(_now_playing_card->get());
-    _station_name_label->align(LV_ALIGN_TOP_MID, 0, 25);
-    _station_name_label->setText("GROOVE SALAD");
+    _station_name_label->align(LV_ALIGN_TOP_MID, 0, 20);
+    _station_name_label->setText("Groove Salad");
     _station_name_label->setTextColor(lv_color_hex(colors::TEXT_PRIMARY));
-    _station_name_label->setTextFont(&lv_font_montserrat_36);
+    _station_name_label->setTextFont(&lv_font_montserrat_32);
 
     // Station description
     _station_desc_label = std::make_unique<Label>(_now_playing_card->get());
-    _station_desc_label->align(LV_ALIGN_TOP_MID, 0, 70);
+    _station_desc_label->align(LV_ALIGN_TOP_MID, 0, 60);
     _station_desc_label->setText("Ambient/Downtempo");
     _station_desc_label->setTextColor(lv_color_hex(colors::TEXT_SECONDARY));
-    _station_desc_label->setTextFont(&lv_font_montserrat_18);
+    _station_desc_label->setTextFont(&lv_font_montserrat_16);
 
-    // Spectrum visualizer
+    // Spectrum visualizer - make it more compact
     _spectrum_chart = std::make_unique<Chart>(_now_playing_card->get());
-    _spectrum_chart->align(LV_ALIGN_CENTER, 0, 10);
-    _spectrum_chart->setSize(800, 80);
+    _spectrum_chart->align(LV_ALIGN_BOTTOM_MID, 0, -45);
+    _spectrum_chart->setSize(900, 50);  // Shorter height
     _spectrum_chart->setBgColor(lv_color_hex(colors::BG_TERTIARY));
-    _spectrum_chart->setRadius(8);
+    _spectrum_chart->setRadius(6);
     _spectrum_chart->setBorderWidth(0);
     _spectrum_chart->setStyleSize(0, 0, LV_PART_INDICATOR);
     _spectrum_chart->setPointCount(32);
@@ -151,22 +155,22 @@ void RadioView::create_now_playing_card()
 
     // Track info
     _track_info_label = std::make_unique<Label>(_now_playing_card->get());
-    _track_info_label->align(LV_ALIGN_BOTTOM_MID, 0, -50);
+    _track_info_label->align(LV_ALIGN_BOTTOM_MID, 0, -15);
     _track_info_label->setText("Press Play to start streaming");
     _track_info_label->setTextColor(lv_color_hex(colors::TEXT_PRIMARY));
-    _track_info_label->setTextFont(&lv_font_montserrat_16);
+    _track_info_label->setTextFont(&lv_font_montserrat_14);
 
     // Status label (buffering/playing)
     _status_label = std::make_unique<Label>(_now_playing_card->get());
-    _status_label->align(LV_ALIGN_BOTTOM_MID, 0, -25);
+    _status_label->align(LV_ALIGN_TOP_MID, 0, 85);
     _status_label->setText("");
     _status_label->setTextColor(lv_color_hex(colors::WARNING));
     _status_label->setTextFont(&lv_font_montserrat_14);
 
     // Buffering spinner (hidden by default)
     _buffering_spinner = std::make_unique<Spinner>(_now_playing_card->get());
-    _buffering_spinner->align(LV_ALIGN_TOP_RIGHT, -20, 20);
-    _buffering_spinner->setSize(30, 30);
+    _buffering_spinner->align(LV_ALIGN_TOP_RIGHT, -20, 15);
+    _buffering_spinner->setSize(25, 25);
     _buffering_spinner->setArcWidth(3, LV_PART_MAIN);
     _buffering_spinner->setArcWidth(3, LV_PART_INDICATOR);
     _buffering_spinner->setArcColor(lv_color_hex(colors::ACCENT), LV_PART_INDICATOR);
@@ -176,38 +180,50 @@ void RadioView::create_now_playing_card()
 
 void RadioView::create_station_grid()
 {
-    // Station grid container
+    // Station grid container - horizontal scrollable row
+    // Screen is 1280x720. Now playing card ends at y=250, transport starts at y=640
+    // Available space for stations: y=260 to y=620 = 360px
     _station_grid = std::make_unique<Container>(_root->get());
-    _station_grid->align(LV_ALIGN_CENTER, 0, 100);
-    _station_grid->setSize(1100, 180);
-    _station_grid->setOpa(0);
+    _station_grid->setPos(20, 260);
+    _station_grid->setSize(1240, 350);  // Almost full width
+    _station_grid->setBgColor(lv_color_hex(colors::BG_PRIMARY));
+    _station_grid->setBorderWidth(0);
+    _station_grid->setScrollbarMode(LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_layout(_station_grid->get(), LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(_station_grid->get(), LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(_station_grid->get(), LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_gap(_station_grid->get(), 15, 0);
+    lv_obj_set_flex_flow(_station_grid->get(), LV_FLEX_FLOW_ROW_WRAP);  // Wrap to multiple rows
+    lv_obj_set_flex_align(_station_grid->get(), LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_gap(_station_grid->get(), 10, 0);
+    lv_obj_set_style_pad_row(_station_grid->get(), 10, 0);
+    lv_obj_clear_flag(_station_grid->get(), LV_OBJ_FLAG_SCROLLABLE);
 
-    // Create station cards
+    // Create station cards - 4 stations per row, 2 rows (1240 / 4 = 310, minus gaps)
     for (int i = 0; i < radio::STATION_COUNT; i++) {
         auto card = std::make_unique<Container>(_station_grid->get());
-        card->setSize(200, 75);
+        card->setSize(295, 160);  // Taller cards to fit text with spacing
         card->setBgColor(lv_color_hex(colors::BG_SECONDARY));
         card->setRadius(12);
         card->setBorderWidth(2);
         card->setBorderColor(lv_color_hex(colors::BG_TERTIARY));
 
-        // Station name label
+        // Station name label (at top with padding)
         auto name_label = lv_label_create(card->get());
         lv_label_set_text(name_label, radio::STATIONS[i].name);
         lv_obj_set_style_text_color(name_label, lv_color_hex(colors::TEXT_PRIMARY), 0);
-        lv_obj_set_style_text_font(name_label, &lv_font_montserrat_14, 0);
-        lv_obj_align(name_label, LV_ALIGN_TOP_MID, 0, 15);
+        lv_obj_set_style_text_font(name_label, &lv_font_montserrat_18, 0);
+        lv_obj_align(name_label, LV_ALIGN_TOP_MID, 0, 25);
+        lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(name_label, 270);
+        lv_obj_set_style_text_align(name_label, LV_TEXT_ALIGN_CENTER, 0);
 
-        // Station description label
+        // Station description label (below name with spacing)
         auto desc_label = lv_label_create(card->get());
         lv_label_set_text(desc_label, radio::STATIONS[i].description);
         lv_obj_set_style_text_color(desc_label, lv_color_hex(colors::TEXT_SECONDARY), 0);
-        lv_obj_set_style_text_font(desc_label, &lv_font_montserrat_12, 0);
-        lv_obj_align(desc_label, LV_ALIGN_BOTTOM_MID, 0, -12);
+        lv_obj_set_style_text_font(desc_label, &lv_font_montserrat_14, 0);
+        lv_obj_align(desc_label, LV_ALIGN_TOP_MID, 0, 60);  // Below name with 35px gap
+        lv_label_set_long_mode(desc_label, LV_LABEL_LONG_WRAP);  // Wrap to multiple lines if needed
+        lv_obj_set_width(desc_label, 270);
+        lv_obj_set_style_text_align(desc_label, LV_TEXT_ALIGN_CENTER, 0);
 
         // Click handler
         int station_idx = i;
@@ -225,10 +241,13 @@ void RadioView::create_station_grid()
 void RadioView::create_transport_controls()
 {
     // Transport container - stored as class member to keep alive
+    // Position at bottom of screen (720 - 70 = 650)
     _transport_container = std::make_unique<Container>(_root->get());
-    _transport_container->align(LV_ALIGN_BOTTOM_MID, -100, -60);
-    _transport_container->setSize(500, 60);
-    _transport_container->setOpa(0);
+    _transport_container->setPos(80, 630);  // Use absolute position
+    _transport_container->setSize(400, 60);
+    _transport_container->setBgColor(lv_color_hex(colors::BG_PRIMARY));
+    _transport_container->setBorderWidth(0);
+    lv_obj_clear_flag(_transport_container->get(), LV_OBJ_FLAG_SCROLLABLE);
 
     // Previous button
     _btn_prev = std::make_unique<Button>(_transport_container->get());
@@ -270,10 +289,13 @@ void RadioView::create_transport_controls()
     _btn_next->onClick().connect([this]() { next_station(); });
 
     // Volume slider container - stored as class member to keep alive
+    // Position to the right of transport controls (at y=640)
     _volume_container = std::make_unique<Container>(_root->get());
-    _volume_container->align(LV_ALIGN_BOTTOM_MID, 250, -60);
-    _volume_container->setSize(300, 50);
-    _volume_container->setOpa(0);
+    _volume_container->setPos(520, 640);  // Use absolute position
+    _volume_container->setSize(350, 50);
+    _volume_container->setBgColor(lv_color_hex(colors::BG_PRIMARY));
+    _volume_container->setBorderWidth(0);
+    lv_obj_clear_flag(_volume_container->get(), LV_OBJ_FLAG_SCROLLABLE);
 
     // Volume icon
     _volume_label = std::make_unique<Label>(_volume_container->get());
@@ -304,7 +326,7 @@ void RadioView::create_transport_controls()
 void RadioView::create_wifi_settings_button()
 {
     _btn_wifi_settings = std::make_unique<Button>(_root->get());
-    _btn_wifi_settings->align(LV_ALIGN_BOTTOM_RIGHT, -20, -20);
+    _btn_wifi_settings->setPos(1130, 650);  // Bottom right, use absolute position
     _btn_wifi_settings->setSize(130, 40);
     _btn_wifi_settings->setBgColor(lv_color_hex(colors::BG_TERTIARY));
     _btn_wifi_settings->setRadius(8);

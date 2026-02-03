@@ -19,8 +19,12 @@ static const char* TAG = "radio";
 /* -------------------------------------------------------------------------- */
 /*                              Ring Buffer                                   */
 /* -------------------------------------------------------------------------- */
-#define RING_BUFFER_SIZE     (64 * 1024)  // 64KB ring buffer
-#define PREBUFFER_SIZE       (16 * 1024)  // 16KB prebuffer before playback
+// 128kbps MP3 = 16KB/sec, so:
+// - 128KB buffer = ~8 seconds of audio
+// - 32KB prebuffer = ~2 seconds before playback starts
+#define RING_BUFFER_SIZE     (128 * 1024)  // 128KB ring buffer (in PSRAM)
+#define PREBUFFER_SIZE       (32 * 1024)   // 32KB prebuffer before playback
+#define MIN_BUFFER_LEVEL     (4 * 1024)    // 4KB minimum before rebuffering
 #define SPECTRUM_BANDS       32
 
 struct RingBuffer {
@@ -320,33 +324,48 @@ static esp_err_t audio_mute_function(AUDIO_PLAYER_MUTE_SETTING setting)
 // Custom FILE-like read from ring buffer
 static RingBuffer* s_audio_ring_buffer = nullptr;
 
+// Track position for fake seek support
+static size_t s_stream_position = 0;
+
 static ssize_t ringbuffer_read(void* cookie, char* buf, size_t size)
 {
     if (!s_audio_ring_buffer || s_radio.stopRequested) {
         return -1;
     }
 
-    // Wait for data with timeout
+    // Block until we have at least some data - this is critical because
+    // returning 0 from read() signals EOF to the audio player!
     int totalRead  = 0;
     int retries    = 0;
-    int maxRetries = 100;  // 1 second timeout
+    int maxRetries = 500;  // 5 seconds timeout - long enough for rebuffering
 
-    while (totalRead < size && retries < maxRetries && !s_radio.stopRequested) {
+    // Wait for at least 1 byte of data before returning
+    while (totalRead == 0 && retries < maxRetries && !s_radio.stopRequested) {
         size_t available = s_audio_ring_buffer->available();
+
         if (available > 0) {
-            size_t toRead = (size - totalRead < available) ? (size - totalRead) : available;
-            size_t read   = s_audio_ring_buffer->read((uint8_t*)buf + totalRead, toRead);
-            totalRead += read;
-            retries = 0;  // Reset retries on successful read
+            // Read as much as available, up to requested size
+            size_t toRead = (size < available) ? size : available;
+            totalRead = s_audio_ring_buffer->read((uint8_t*)buf, toRead);
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));
             retries++;
         }
     }
 
-    if (totalRead == 0 && s_radio.stopRequested) {
-        return -1;  // Signal EOF
+    // If we couldn't get any data and stop was requested, signal EOF
+    if (totalRead == 0) {
+        if (s_radio.stopRequested) {
+            mclog::tagInfo(TAG, "ringbuffer_read: stop requested, returning -1");
+            return -1;  // Signal EOF
+        }
+        // Timeout waiting for data - this shouldn't happen often
+        // Return -1 to signal error rather than 0 (which means EOF)
+        mclog::tagWarn(TAG, "ringbuffer_read: timeout waiting for data");
+        return -1;
     }
+
+    s_stream_position += totalRead;
 
     // Update spectrum data from audio
     if (totalRead > 0) {
@@ -369,8 +388,34 @@ static ssize_t ringbuffer_read(void* cookie, char* buf, size_t size)
     return totalRead;
 }
 
+// Fake seek - for streams we can only support SEEK_SET to 0 (reset)
+// The MP3 decoder calls fseek(fp, 0, SEEK_SET) to reset position
+// We can't actually seek in a live stream, but we can pretend for the initial check
+static int ringbuffer_seek(void* cookie, off_t* offset, int whence)
+{
+    // For a stream, we can only "seek" to report current position
+    // or pretend to seek to start (which we can't actually do)
+    if (whence == SEEK_SET && *offset == 0) {
+        // Pretend we're at the start - this allows is_mp3() detection to work
+        // The actual read will get data from wherever the stream currently is
+        s_stream_position = 0;
+        return 0;
+    } else if (whence == SEEK_CUR && *offset == 0) {
+        // Just return current position
+        *offset = (off_t)s_stream_position;
+        return 0;
+    } else if (whence == SEEK_END) {
+        // Can't seek to end of a live stream
+        return -1;
+    }
+
+    // For any other seek, return error
+    return -1;
+}
+
 static int ringbuffer_close(void* cookie)
 {
+    s_stream_position = 0;
     return 0;
 }
 
@@ -418,15 +463,17 @@ static void audio_decode_task(void* param)
         return;
     }
 
-    // Create custom FILE from ring buffer using funopen
+    // Create custom FILE from ring buffer using fopencookie
+    // We provide a seek function so is_mp3() detection works
     s_audio_ring_buffer = &s_radio.ringBuffer;
+    s_stream_position = 0;
     cookie_io_functions_t io_funcs = {
         .read  = ringbuffer_read,
         .write = nullptr,
-        .seek  = nullptr,
+        .seek  = ringbuffer_seek,
         .close = ringbuffer_close,
     };
-    FILE* stream_fp = fopencookie(nullptr, "r", io_funcs);
+    FILE* stream_fp = fopencookie(nullptr, "rb", io_funcs);
     if (!stream_fp) {
         mclog::tagError(TAG, "Failed to create stream FILE");
         audio_player_delete();
@@ -446,7 +493,7 @@ static void audio_decode_task(void* param)
         return;
     }
 
-    // Wait for stop signal
+    // Wait for stop signal or idle state
     while (!s_radio.stopRequested) {
         audio_player_state_t state = audio_player_get_state();
         if (state == AUDIO_PLAYER_STATE_IDLE) {
@@ -456,10 +503,19 @@ static void audio_decode_task(void* param)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    // Cleanup
+    // Cleanup - delete audio player first
     audio_player_delete();
-    fclose(stream_fp);
+
+    // Note: Don't call fclose on fopencookie FILE - it can cause issues
+    // The ringbuffer_close callback handles cleanup
+    // fclose(stream_fp);  // Removed - causes mutex assertion failure
     s_audio_ring_buffer = nullptr;
+
+    // Update state
+    if (s_radio.mutex && xSemaphoreTake(s_radio.mutex, pdMS_TO_TICKS(100))) {
+        s_radio.state = hal::HalBase::RADIO_STOPPED;
+        xSemaphoreGive(s_radio.mutex);
+    }
 
     mclog::tagInfo(TAG, "Audio decode task ended");
     s_radio.audioTask = nullptr;
@@ -551,24 +607,39 @@ void HalEsp32::stopRadioStream()
 {
     mclog::tagInfo(TAG, "Stopping radio stream");
 
+    // Signal tasks to stop
     s_radio.stopRequested = true;
 
-    // Wait for tasks to end
-    int timeout = 50;  // 5 seconds
-    while ((s_radio.httpTask || s_radio.audioTask) && timeout > 0) {
+    // Wait for audio task to end first (it's the consumer)
+    int timeout = 50;  // 5 seconds for audio task
+    while (s_radio.audioTask && timeout > 0) {
         vTaskDelay(pdMS_TO_TICKS(100));
         timeout--;
     }
 
-    // Force delete if still running
+    // Wait for HTTP task to end (it should stop after audio task is gone)
+    timeout = 50;  // 5 seconds for HTTP task
+    while (s_radio.httpTask && timeout > 0) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        timeout--;
+    }
+
+    // Don't force delete HTTP task - it crashes the lwip stack!
+    // If tasks are still running, just log a warning and continue
+    // The tasks will clean themselves up eventually
     if (s_radio.httpTask) {
-        vTaskDelete(s_radio.httpTask);
+        mclog::tagWarn(TAG, "HTTP task still running, not force deleting (would crash lwip)");
+        // Just clear the handle - task will delete itself
         s_radio.httpTask = nullptr;
     }
     if (s_radio.audioTask) {
-        vTaskDelete(s_radio.audioTask);
+        mclog::tagWarn(TAG, "Audio task still running, not force deleting");
         s_radio.audioTask = nullptr;
     }
+
+    // Reset audio state
+    s_audio_ring_buffer = nullptr;
+    s_stream_position = 0;
 
     // Update state
     if (s_radio.mutex && xSemaphoreTake(s_radio.mutex, portMAX_DELAY)) {
@@ -579,6 +650,9 @@ void HalEsp32::stopRadioStream()
 
     radioMetadata.title         = "";
     radioMetadata.bufferPercent = 0;
+
+    // Give time for tasks to fully clean up and network stack to settle
+    vTaskDelay(pdMS_TO_TICKS(500));
 }
 
 void HalEsp32::getRadioSpectrum(uint8_t* spectrum, size_t len)
