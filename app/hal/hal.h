@@ -258,6 +258,69 @@ public:
     {
     }
 
+    /* ----------------------------- WiFi STA Mode ------------------------------ */
+    enum WifiState_t {
+        WIFI_DISCONNECTED,
+        WIFI_CONNECTING,
+        WIFI_CONNECTED,
+        WIFI_FAILED
+    };
+    virtual WifiState_t getWifiState()
+    {
+        return WIFI_DISCONNECTED;
+    }
+    virtual bool connectWifiSta(const std::string& ssid, const std::string& password)
+    {
+        return false;
+    }
+    virtual void disconnectWifi()
+    {
+    }
+    virtual std::string getWifiIp()
+    {
+        return "";
+    }
+    virtual std::string getWifiSsid()
+    {
+        return "";
+    }
+    virtual void saveWifiConfig(const std::string& ssid, const std::string& password)
+    {
+    }
+    virtual bool loadWifiConfig(std::string& ssid, std::string& password)
+    {
+        return false;
+    }
+
+    /* ------------------------------ Radio Stream ------------------------------ */
+    enum RadioState_t {
+        RADIO_STOPPED,
+        RADIO_BUFFERING,
+        RADIO_PLAYING,
+        RADIO_ERROR
+    };
+    struct RadioMetadata_t {
+        std::string title;       // Current track (from ICY metadata)
+        std::string station;     // Station name
+        int bitrate       = 0;
+        int bufferPercent = 0;
+    };
+    RadioMetadata_t radioMetadata;
+    virtual RadioState_t getRadioState()
+    {
+        return RADIO_STOPPED;
+    }
+    virtual bool startRadioStream(const std::string& url)
+    {
+        return false;
+    }
+    virtual void stopRadioStream()
+    {
+    }
+    virtual void getRadioSpectrum(uint8_t* spectrum, size_t len)
+    {
+    }
+
     /* --------------------------------- SD Card -------------------------------- */
     struct FileEntry_t {
         std::string name;

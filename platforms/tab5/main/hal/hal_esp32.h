@@ -75,6 +75,21 @@ public:
     bool getExtAntennaEnable() override;
     void startWifiAp() override;
 
+    // WiFi STA mode
+    WifiState_t getWifiState() override;
+    bool connectWifiSta(const std::string& ssid, const std::string& password) override;
+    void disconnectWifi() override;
+    std::string getWifiIp() override;
+    std::string getWifiSsid() override;
+    void saveWifiConfig(const std::string& ssid, const std::string& password) override;
+    bool loadWifiConfig(std::string& ssid, std::string& password) override;
+
+    // Radio streaming
+    RadioState_t getRadioState() override;
+    bool startRadioStream(const std::string& url) override;
+    void stopRadioStream() override;
+    void getRadioSpectrum(uint8_t* spectrum, size_t len) override;
+
     bool isSdCardMounted() override;
     std::vector<FileEntry_t> scanSdCard(const std::string& dirPath) override;
 
@@ -93,6 +108,7 @@ private:
     void hid_init();
     void rs485_init();
     bool wifi_init();
+    bool wifi_sta_init();
     void imu_init();
     void update_system_time();
 
@@ -103,4 +119,13 @@ private:
     bool _usba_5v_enable            = true;
     bool _ext_antenna_enable        = false;
     bool _sd_card_mounted           = false;
+
+    // WiFi STA state
+    WifiState_t _wifi_state  = WIFI_DISCONNECTED;
+    std::string _wifi_ssid   = "";
+    std::string _wifi_ip     = "";
+    bool _wifi_initialized   = false;
+
+    // Radio stream state
+    RadioState_t _radio_state = RADIO_STOPPED;
 };
