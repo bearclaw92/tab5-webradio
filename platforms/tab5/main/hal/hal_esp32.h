@@ -7,9 +7,15 @@
 #include <hal/hal.h>
 #include <ina226.hpp>
 #include <lvgl.h>
+#include <esp_event_base.h>
 #include "utils/rx8130/rx8130.h"
 
+// Forward declaration for friend function
+void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+
 class HalEsp32 : public hal::HalBase {
+    friend void wifi_event_handler(void*, esp_event_base_t, int32_t, void*);
+
 public:
     std::string type() override
     {

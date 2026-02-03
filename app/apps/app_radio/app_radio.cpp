@@ -12,7 +12,7 @@ static const char* TAG = "app_radio";
 
 AppRadio::AppRadio()
 {
-    setAppName("SomaFM Radio");
+    setAppInfo().name = "SomaFM Radio";
 }
 
 AppRadio::~AppRadio()

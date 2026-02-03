@@ -253,12 +253,25 @@ static void http_stream_task(void* param)
 {
     mclog::tagInfo(TAG, "HTTP stream task started for: {}", s_radio.currentUrl);
 
+    // Check if URL is HTTPS or HTTP
+    bool is_https = s_radio.currentUrl.find("https://") == 0;
+
     esp_http_client_config_t config = {};
     config.url                      = s_radio.currentUrl.c_str();
     config.event_handler            = http_event_handler;
     config.buffer_size              = 4096;
     config.timeout_ms               = 30000;
     config.keep_alive_enable        = true;
+
+    if (is_https) {
+        // For HTTPS: skip certificate verification for radio streams
+        // (RTC may not have correct time, and streams are public anyway)
+        config.skip_cert_common_name_check = true;
+        config.use_global_ca_store         = false;
+        config.crt_bundle_attach           = NULL;
+        // Set cert_pem to empty to skip server cert verification
+        config.cert_pem                    = NULL;
+    }
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
@@ -307,7 +320,7 @@ static esp_err_t audio_mute_function(AUDIO_PLAYER_MUTE_SETTING setting)
 // Custom FILE-like read from ring buffer
 static RingBuffer* s_audio_ring_buffer = nullptr;
 
-static int ringbuffer_read(void* cookie, char* buf, int size)
+static ssize_t ringbuffer_read(void* cookie, char* buf, size_t size)
 {
     if (!s_audio_ring_buffer || s_radio.stopRequested) {
         return -1;
@@ -458,6 +471,10 @@ static void audio_decode_task(void* param)
 /* -------------------------------------------------------------------------- */
 hal::HalBase::RadioState_t HalEsp32::getRadioState()
 {
+    // Check if mutex exists (radio hasn't been initialized yet)
+    if (!s_radio.mutex) {
+        return RADIO_STOPPED;
+    }
     if (xSemaphoreTake(s_radio.mutex, pdMS_TO_TICKS(100))) {
         RadioState_t state = s_radio.state;
         xSemaphoreGive(s_radio.mutex);

@@ -30,9 +30,15 @@ void RadioView::init()
 {
     mclog::tagInfo(TAG, "Initializing radio view");
 
+    // Get actual display size (after rotation)
+    lv_display_t* disp = lv_display_get_default();
+    int32_t screen_width = lv_display_get_horizontal_resolution(disp);
+    int32_t screen_height = lv_display_get_vertical_resolution(disp);
+    mclog::tagInfo(TAG, "Screen size: {}x{}", screen_width, screen_height);
+
     // Create root container (full screen)
     _root = std::make_unique<Container>(lv_screen_active());
-    _root->setSize(1280, 720);
+    _root->setSize(screen_width, screen_height);
     _root->setPos(0, 0);
     _root->setBgColor(lv_color_hex(colors::BG_PRIMARY));
     _root->setBorderWidth(0);
@@ -82,14 +88,14 @@ void RadioView::update()
 
 void RadioView::create_wifi_status()
 {
-    // WiFi status container (top right)
-    auto wifi_container = std::make_unique<Container>(_root->get());
-    wifi_container->align(LV_ALIGN_TOP_RIGHT, -20, 20);
-    wifi_container->setSize(200, 30);
-    wifi_container->setOpa(0);
+    // WiFi status container (top right) - stored as class member to keep alive
+    _wifi_status_container = std::make_unique<Container>(_root->get());
+    _wifi_status_container->align(LV_ALIGN_TOP_RIGHT, -20, 20);
+    _wifi_status_container->setSize(200, 30);
+    _wifi_status_container->setOpa(0);
 
     // Status dot
-    _wifi_status_dot = std::make_unique<Container>(wifi_container->get());
+    _wifi_status_dot = std::make_unique<Container>(_wifi_status_container->get());
     _wifi_status_dot->setSize(10, 10);
     _wifi_status_dot->setRadius(5);
     _wifi_status_dot->align(LV_ALIGN_LEFT_MID, 0, 0);
@@ -97,7 +103,7 @@ void RadioView::create_wifi_status()
     _wifi_status_dot->setBorderWidth(0);
 
     // Status label
-    _wifi_status_label = std::make_unique<Label>(wifi_container->get());
+    _wifi_status_label = std::make_unique<Label>(_wifi_status_container->get());
     _wifi_status_label->align(LV_ALIGN_LEFT_MID, 18, 0);
     _wifi_status_label->setText("Disconnected");
     _wifi_status_label->setTextColor(lv_color_hex(colors::TEXT_SECONDARY));
@@ -175,7 +181,7 @@ void RadioView::create_station_grid()
     _station_grid->align(LV_ALIGN_CENTER, 0, 100);
     _station_grid->setSize(1100, 180);
     _station_grid->setOpa(0);
-    _station_grid->setLayout(LV_LAYOUT_FLEX);
+    lv_obj_set_layout(_station_grid->get(), LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(_station_grid->get(), LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(_station_grid->get(), LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_gap(_station_grid->get(), 15, 0);
@@ -218,14 +224,14 @@ void RadioView::create_station_grid()
 
 void RadioView::create_transport_controls()
 {
-    // Transport container
-    auto transport = std::make_unique<Container>(_root->get());
-    transport->align(LV_ALIGN_BOTTOM_MID, -100, -60);
-    transport->setSize(500, 60);
-    transport->setOpa(0);
+    // Transport container - stored as class member to keep alive
+    _transport_container = std::make_unique<Container>(_root->get());
+    _transport_container->align(LV_ALIGN_BOTTOM_MID, -100, -60);
+    _transport_container->setSize(500, 60);
+    _transport_container->setOpa(0);
 
     // Previous button
-    _btn_prev = std::make_unique<Button>(transport->get());
+    _btn_prev = std::make_unique<Button>(_transport_container->get());
     _btn_prev->align(LV_ALIGN_LEFT_MID, 0, 0);
     _btn_prev->setSize(60, 50);
     _btn_prev->setBgColor(lv_color_hex(colors::BG_TERTIARY));
@@ -238,7 +244,7 @@ void RadioView::create_transport_controls()
     _btn_prev->onClick().connect([this]() { prev_station(); });
 
     // Play/Pause button
-    _btn_play = std::make_unique<Button>(transport->get());
+    _btn_play = std::make_unique<Button>(_transport_container->get());
     _btn_play->align(LV_ALIGN_CENTER, 0, 0);
     _btn_play->setSize(100, 50);
     _btn_play->setBgColor(lv_color_hex(colors::ACCENT));
@@ -251,7 +257,7 @@ void RadioView::create_transport_controls()
     _btn_play->onClick().connect([this]() { toggle_playback(); });
 
     // Next button
-    _btn_next = std::make_unique<Button>(transport->get());
+    _btn_next = std::make_unique<Button>(_transport_container->get());
     _btn_next->align(LV_ALIGN_RIGHT_MID, 0, 0);
     _btn_next->setSize(60, 50);
     _btn_next->setBgColor(lv_color_hex(colors::BG_TERTIARY));
@@ -263,21 +269,21 @@ void RadioView::create_transport_controls()
     _btn_next->label().setTextFont(&lv_font_montserrat_20);
     _btn_next->onClick().connect([this]() { next_station(); });
 
-    // Volume slider container
-    auto vol_container = std::make_unique<Container>(_root->get());
-    vol_container->align(LV_ALIGN_BOTTOM_MID, 250, -60);
-    vol_container->setSize(300, 50);
-    vol_container->setOpa(0);
+    // Volume slider container - stored as class member to keep alive
+    _volume_container = std::make_unique<Container>(_root->get());
+    _volume_container->align(LV_ALIGN_BOTTOM_MID, 250, -60);
+    _volume_container->setSize(300, 50);
+    _volume_container->setOpa(0);
 
     // Volume icon
-    _volume_label = std::make_unique<Label>(vol_container->get());
+    _volume_label = std::make_unique<Label>(_volume_container->get());
     _volume_label->align(LV_ALIGN_LEFT_MID, 0, 0);
     _volume_label->setText(LV_SYMBOL_VOLUME_MAX);
     _volume_label->setTextColor(lv_color_hex(colors::TEXT_SECONDARY));
     _volume_label->setTextFont(&lv_font_montserrat_18);
 
     // Volume slider
-    _volume_slider = std::make_unique<Slider>(vol_container->get());
+    _volume_slider = std::make_unique<Slider>(_volume_container->get());
     _volume_slider->align(LV_ALIGN_RIGHT_MID, 0, 0);
     _volume_slider->setSize(220, 10);
     _volume_slider->setRange(0, 100);
@@ -287,10 +293,12 @@ void RadioView::create_transport_controls()
     lv_obj_set_style_bg_color(_volume_slider->get(), lv_color_hex(colors::TEXT_PRIMARY), LV_PART_KNOB);
     lv_obj_set_style_pad_all(_volume_slider->get(), 5, LV_PART_KNOB);
 
-    _volume_slider->onChange().connect([this]() {
-        int vol = _volume_slider->getValue();
+    // Volume change callback using native LVGL event
+    lv_obj_add_event_cb(_volume_slider->get(), [](lv_event_t* e) {
+        lv_obj_t* target = (lv_obj_t*)lv_event_get_target(e);
+        int vol = lv_slider_get_value(target);
         GetHAL()->setSpeakerVolume(vol);
-    });
+    }, LV_EVENT_VALUE_CHANGED, this);
 }
 
 void RadioView::create_wifi_settings_button()

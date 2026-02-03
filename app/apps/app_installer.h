@@ -34,8 +34,9 @@ inline void on_startup_anim()
  */
 inline void on_install_apps()
 {
-    // Install SomaFM Radio as the standalone main app
-    mooncake::GetMooncake().installApp(std::make_unique<AppRadio>());
+    // Install and open SomaFM Radio as the standalone main app
+    auto app_id = mooncake::GetMooncake().installApp(std::make_unique<AppRadio>());
+    mooncake::GetMooncake().openApp(app_id);
 
     // Original launcher (commented out - can be restored if needed)
     // mooncake::GetMooncake().installApp(std::make_unique<AppLauncher>());

@@ -111,9 +111,9 @@ void wifi_init_softap()
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     wifi_config_t wifi_config = {};
-    std::strncpy(reinterpret_cast<char*>(wifi_config.ap.ssid), WIFI_SSID, sizeof(wifi_config.ap.ssid));
-    std::strncpy(reinterpret_cast<char*>(wifi_config.ap.password), WIFI_PASS, sizeof(wifi_config.ap.password));
-    wifi_config.ap.ssid_len       = std::strlen(WIFI_SSID);
+    std::strncpy(reinterpret_cast<char*>(wifi_config.ap.ssid), WIFI_AP_SSID, sizeof(wifi_config.ap.ssid));
+    std::strncpy(reinterpret_cast<char*>(wifi_config.ap.password), WIFI_AP_PASS, sizeof(wifi_config.ap.password));
+    wifi_config.ap.ssid_len       = std::strlen(WIFI_AP_SSID);
     wifi_config.ap.max_connection = MAX_STA_CONN;
     wifi_config.ap.authmode       = WIFI_AUTH_OPEN;
 
@@ -121,7 +121,7 @@ void wifi_init_softap()
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "Wi-Fi AP started. SSID:%s password:%s", WIFI_SSID, WIFI_PASS);
+    ESP_LOGI(TAG, "Wi-Fi AP started. SSID:%s password:%s", WIFI_AP_SSID, WIFI_AP_PASS);
 }
 
 static void wifi_ap_test_task(void* param)
@@ -139,6 +139,8 @@ bool HalEsp32::wifi_init()
 {
     mclog::tagInfo(TAG, "wifi init");
 
+    // Only initialize NVS here - actual WiFi init happens in wifi_sta_init()
+    // when connecting to a network (STA mode is used for internet radio)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -146,7 +148,9 @@ bool HalEsp32::wifi_init()
     }
     ESP_ERROR_CHECK(ret);
 
-    xTaskCreate(wifi_ap_test_task, "ap", 4096, nullptr, 5, nullptr);
+    // Don't start AP mode - we use STA mode for radio streaming
+    // The AP mode code is kept for future use if needed
+    // xTaskCreate(wifi_ap_test_task, "ap", 4096, nullptr, 5, nullptr);
     return true;
 }
 
@@ -171,7 +175,7 @@ void HalEsp32::startWifiAp()
 /*                              WiFi STA Mode                                 */
 /* -------------------------------------------------------------------------- */
 
-static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         mclog::tagInfo(TAG, "WiFi STA started, connecting...");
@@ -217,13 +221,14 @@ bool HalEsp32::wifi_sta_init()
 
     mclog::tagInfo(TAG, "Initializing WiFi STA mode");
 
-    // Initialize NVS
+    // NVS should already be initialized in wifi_init(), but check anyway
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
-    if (ret != ESP_OK) {
+    // ESP_ERR_NVS_INVALID_STATE means already initialized - that's OK
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_INVALID_STATE) {
         mclog::tagError(TAG, "NVS flash init failed: {}", esp_err_to_name(ret));
         return false;
     }

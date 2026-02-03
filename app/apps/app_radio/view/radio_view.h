@@ -50,6 +50,7 @@ private:
     std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Container> _root;
 
     // WiFi status indicator
+    std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Container> _wifi_status_container;
     std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Label> _wifi_status_label;
     std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Container> _wifi_status_dot;
 
@@ -67,9 +68,11 @@ private:
     std::vector<std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Container>> _station_cards;
 
     // Transport controls
+    std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Container> _transport_container;
     std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Button> _btn_prev;
     std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Button> _btn_play;
     std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Button> _btn_next;
+    std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Container> _volume_container;
     std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Slider> _volume_slider;
     std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Label> _volume_label;
 
