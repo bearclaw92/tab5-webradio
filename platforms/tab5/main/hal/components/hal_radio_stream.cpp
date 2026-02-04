@@ -20,11 +20,12 @@ static const char* TAG = "radio";
 /*                              Ring Buffer                                   */
 /* -------------------------------------------------------------------------- */
 // 128kbps MP3 = 16KB/sec, so:
-// - 128KB buffer = ~8 seconds of audio
-// - 32KB prebuffer = ~2 seconds before playback starts
-#define RING_BUFFER_SIZE     (128 * 1024)  // 128KB ring buffer (in PSRAM)
-#define PREBUFFER_SIZE       (32 * 1024)   // 32KB prebuffer before playback
-#define MIN_BUFFER_LEVEL     (4 * 1024)    // 4KB minimum before rebuffering
+// - 256KB buffer = ~16 seconds of audio
+// - 64KB prebuffer = ~4 seconds before playback starts
+// Larger buffers help with network jitter and WiFi instability
+#define RING_BUFFER_SIZE     (256 * 1024)  // 256KB ring buffer (in PSRAM)
+#define PREBUFFER_SIZE       (64 * 1024)   // 64KB prebuffer before playback
+#define MIN_BUFFER_LEVEL     (8 * 1024)    // 8KB minimum before rebuffering
 #define SPECTRUM_BANDS       32
 
 struct RingBuffer {
@@ -140,6 +141,7 @@ struct RadioStreamState {
     RingBuffer ringBuffer;
     uint8_t spectrum[SPECTRUM_BANDS] = {0};
     HalEsp32* hal                    = nullptr;
+    uint32_t streamId        = 0;  // Incremented each stream, used to ignore old HTTP tasks
 };
 
 static RadioStreamState s_radio;
@@ -173,6 +175,9 @@ static void parse_icy_metadata(const char* metadata, size_t len)
 /* -------------------------------------------------------------------------- */
 /*                           HTTP Event Handler                               */
 /* -------------------------------------------------------------------------- */
+// Stream ID for current HTTP task - used to ignore data from stale tasks
+static uint32_t s_http_task_stream_id = 0;
+
 static esp_err_t http_event_handler(esp_http_client_event_t* evt)
 {
     switch (evt->event_id) {
@@ -205,34 +210,66 @@ static esp_err_t http_event_handler(esp_http_client_event_t* evt)
                 return ESP_FAIL;  // Stop the HTTP request
             }
 
+            // Check if this HTTP task is still the current one
+            // If a new stream started, ignore data from old tasks
+            if (s_http_task_stream_id != s_radio.streamId) {
+                return ESP_FAIL;  // Stale task, stop it
+            }
+
             // Handle ICY metadata if present
             if (s_radio.icyMetaInt > 0) {
                 uint8_t* data     = (uint8_t*)evt->data;
                 int dataLen       = evt->data_len;
                 int dataPos       = 0;
 
-                while (dataPos < dataLen) {
+                while (dataPos < dataLen && s_http_task_stream_id == s_radio.streamId) {
                     if (s_radio.bytesUntilMeta > 0) {
                         // Write audio data
                         int audioBytes = (dataLen - dataPos < s_radio.bytesUntilMeta)
                                              ? (dataLen - dataPos)
                                              : s_radio.bytesUntilMeta;
-                        s_radio.ringBuffer.write(data + dataPos, audioBytes);
+                        size_t written = s_radio.ringBuffer.write(data + dataPos, audioBytes);
+                        if (written < (size_t)audioBytes) {
+                            // Buffer full - this shouldn't happen with our large buffer
+                            static uint32_t lastFullLog = 0;
+                            uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                            if ((now - lastFullLog) > 1000) {
+                                mclog::tagWarn(TAG, "Ring buffer full! Dropping {} bytes", audioBytes - written);
+                                lastFullLog = now;
+                            }
+                        }
                         dataPos += audioBytes;
                         s_radio.bytesUntilMeta -= audioBytes;
                     } else {
                         // Read metadata length byte
                         int metaLen = data[dataPos++] * 16;
-                        if (metaLen > 0 && dataPos + metaLen <= dataLen) {
-                            parse_icy_metadata((char*)(data + dataPos), metaLen);
-                            dataPos += metaLen;
+                        if (metaLen > 0) {
+                            if (dataPos + metaLen <= dataLen) {
+                                // Full metadata in this chunk
+                                parse_icy_metadata((char*)(data + dataPos), metaLen);
+                                dataPos += metaLen;
+                            } else {
+                                // Metadata spans chunks - skip it (rare edge case)
+                                // Just skip the bytes we have and reset counter
+                                int skipBytes = dataLen - dataPos;
+                                dataPos = dataLen;
+                                mclog::tagWarn(TAG, "ICY metadata spans chunks, skipping ({} bytes)", metaLen);
+                            }
                         }
                         s_radio.bytesUntilMeta = s_radio.icyMetaInt;
                     }
                 }
             } else {
                 // No ICY metadata, write directly
-                s_radio.ringBuffer.write((uint8_t*)evt->data, evt->data_len);
+                size_t written = s_radio.ringBuffer.write((uint8_t*)evt->data, evt->data_len);
+                if (written < (size_t)evt->data_len) {
+                    static uint32_t lastFullLog = 0;
+                    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                    if ((now - lastFullLog) > 1000) {
+                        mclog::tagWarn(TAG, "Ring buffer full! Dropping {} bytes", evt->data_len - written);
+                        lastFullLog = now;
+                    }
+                }
             }
 
             // Update buffer percentage
@@ -255,7 +292,10 @@ static esp_err_t http_event_handler(esp_http_client_event_t* evt)
 /* -------------------------------------------------------------------------- */
 static void http_stream_task(void* param)
 {
-    mclog::tagInfo(TAG, "HTTP stream task started for: {}", s_radio.currentUrl);
+    // Capture the stream ID for this task - used to ignore data from stale tasks
+    uint32_t myStreamId = s_radio.streamId;
+    s_http_task_stream_id = myStreamId;
+    mclog::tagInfo(TAG, "HTTP stream task started for: {} (stream #{})", s_radio.currentUrl, myStreamId);
 
     // Check if URL is HTTPS or HTTP
     bool is_https = s_radio.currentUrl.find("https://") == 0;
@@ -292,18 +332,27 @@ static void http_stream_task(void* param)
     esp_http_client_set_header(client, "Icy-MetaData", "1");
     esp_http_client_set_header(client, "User-Agent", "Tab5-WebRadio/1.0");
 
-    // Perform HTTP request
+    // Perform HTTP request - this blocks while streaming
+    mclog::tagInfo(TAG, "HTTP client performing request...");
     esp_err_t err = esp_http_client_perform(client);
-    if (err != ESP_OK && !s_radio.stopRequested) {
-        mclog::tagError(TAG, "HTTP stream error: {}", esp_err_to_name(err));
-        if (xSemaphoreTake(s_radio.mutex, portMAX_DELAY)) {
-            s_radio.state = hal::HalBase::RADIO_ERROR;
-            xSemaphoreGive(s_radio.mutex);
+
+    // Log why the HTTP request ended
+    if (err != ESP_OK) {
+        if (s_radio.stopRequested) {
+            mclog::tagInfo(TAG, "HTTP stream stopped by user request");
+        } else {
+            mclog::tagError(TAG, "HTTP stream error: {} ({})", esp_err_to_name(err), (int)err);
+            if (xSemaphoreTake(s_radio.mutex, portMAX_DELAY)) {
+                s_radio.state = hal::HalBase::RADIO_ERROR;
+                xSemaphoreGive(s_radio.mutex);
+            }
         }
+    } else {
+        mclog::tagInfo(TAG, "HTTP stream completed normally (unexpected for live stream!)");
     }
 
     esp_http_client_cleanup(client);
-    mclog::tagInfo(TAG, "HTTP stream task ended");
+    mclog::tagInfo(TAG, "HTTP stream task ended (stream #{})", myStreamId);
 
     s_radio.httpTask = nullptr;
     vTaskDelete(nullptr);
@@ -312,7 +361,6 @@ static void http_stream_task(void* param)
 /* -------------------------------------------------------------------------- */
 /*                           Audio Decode Task                                */
 /* -------------------------------------------------------------------------- */
-static uint8_t _current_volume = 60;
 
 static esp_err_t audio_mute_function(AUDIO_PLAYER_MUTE_SETTING setting)
 {
@@ -327,27 +375,99 @@ static RingBuffer* s_audio_ring_buffer = nullptr;
 // Track position for fake seek support
 static size_t s_stream_position = 0;
 
+// Save first bytes for rewind support (needed for is_mp3() detection)
+// ID3v2 header is 10 bytes, but we need more to handle the ID3 tag size
+// which can be up to several KB. We'll save enough for typical ID3 detection.
+#define HEADER_BUFFER_SIZE 4096
+static uint8_t* s_header_buffer = nullptr;  // Dynamically allocated in PSRAM
+static size_t s_header_bytes_saved = 0;
+static size_t s_header_read_pos = 0;
+static bool s_header_replay_mode = false;
+
+// Flag to log first header read - reset when starting new stream
+static bool s_first_header_read_logged = false;
+
 static ssize_t ringbuffer_read(void* cookie, char* buf, size_t size)
 {
     if (!s_audio_ring_buffer || s_radio.stopRequested) {
         return -1;
     }
 
+    int totalRead = 0;
+
+    // If in header replay mode, serve from saved header first
+    if (s_header_buffer && s_header_replay_mode && s_header_read_pos < s_header_bytes_saved) {
+        size_t headerAvail = s_header_bytes_saved - s_header_read_pos;
+        size_t toRead = (size < headerAvail) ? size : headerAvail;
+        memcpy(buf, s_header_buffer + s_header_read_pos, toRead);
+        s_header_read_pos += toRead;
+        totalRead = toRead;
+        s_stream_position += toRead;
+
+        // Log first read from header buffer (once per stream)
+        if (!s_first_header_read_logged) {
+            mclog::tagInfo(TAG, "First header read: {} bytes, first 4: {:02X} {:02X} {:02X} {:02X}",
+                          toRead, (uint8_t)buf[0], (uint8_t)buf[1], (uint8_t)buf[2], (uint8_t)buf[3]);
+            s_first_header_read_logged = true;
+        }
+
+        // If we've replayed all header bytes, exit replay mode
+        if (s_header_read_pos >= s_header_bytes_saved) {
+            mclog::tagInfo(TAG, "Header replay complete, switching to ring buffer");
+            s_header_replay_mode = false;
+        }
+
+        // If we've satisfied the request, return
+        if ((size_t)totalRead >= size) {
+            return totalRead;
+        }
+        // Otherwise continue reading from ring buffer
+        buf += totalRead;
+        size -= totalRead;
+    }
+
     // Block until we have at least some data - this is critical because
     // returning 0 from read() signals EOF to the audio player!
-    int totalRead  = 0;
+    // For live streams, we need to be very patient - network can have long stalls
     int retries    = 0;
-    int maxRetries = 500;  // 5 seconds timeout - long enough for rebuffering
+    int maxRetries = 3000;  // 30 seconds timeout - very patient for live streams
+    static uint32_t lastBufferLog = 0;
+    static uint32_t lastHealthyLog = 0;
 
     // Wait for at least 1 byte of data before returning
-    while (totalRead == 0 && retries < maxRetries && !s_radio.stopRequested) {
+    while (retries < maxRetries && !s_radio.stopRequested) {
         size_t available = s_audio_ring_buffer->available();
 
         if (available > 0) {
+            uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+            // Log buffer level periodically when low
+            if (available < MIN_BUFFER_LEVEL && (now - lastBufferLog) > 1000) {
+                mclog::tagWarn(TAG, "Buffer low: {} bytes ({} KB)", available, available / 1024);
+                lastBufferLog = now;
+            }
+
+            // Log healthy buffer periodically (every 10 seconds)
+            if (available >= MIN_BUFFER_LEVEL && (now - lastHealthyLog) > 10000) {
+                mclog::tagInfo(TAG, "Buffer healthy: {} KB", available / 1024);
+                lastHealthyLog = now;
+            }
+
             // Read as much as available, up to requested size
             size_t toRead = (size < available) ? size : available;
-            totalRead = s_audio_ring_buffer->read((uint8_t*)buf, toRead);
+            size_t bytesRead = s_audio_ring_buffer->read((uint8_t*)buf, toRead);
+
+            totalRead += bytesRead;
+            s_stream_position += bytesRead;
+            break;  // Got data, exit wait loop
         } else {
+            // Buffer empty! Log this (but not too often)
+            if (retries == 0) {
+                mclog::tagWarn(TAG, "Buffer empty! Waiting for data...");
+            } else if (retries % 100 == 0) {
+                // Log every second while waiting
+                mclog::tagWarn(TAG, "Still waiting for data... ({} seconds)", retries / 100);
+            }
             vTaskDelay(pdMS_TO_TICKS(10));
             retries++;
         }
@@ -359,13 +479,10 @@ static ssize_t ringbuffer_read(void* cookie, char* buf, size_t size)
             mclog::tagInfo(TAG, "ringbuffer_read: stop requested, returning -1");
             return -1;  // Signal EOF
         }
-        // Timeout waiting for data - this shouldn't happen often
-        // Return -1 to signal error rather than 0 (which means EOF)
-        mclog::tagWarn(TAG, "ringbuffer_read: timeout waiting for data");
+        // Timeout waiting for data - after 30 seconds, give up
+        mclog::tagError(TAG, "ringbuffer_read: timeout after 30s waiting for data");
         return -1;
     }
-
-    s_stream_position += totalRead;
 
     // Update spectrum data from audio
     if (totalRead > 0) {
@@ -390,14 +507,19 @@ static ssize_t ringbuffer_read(void* cookie, char* buf, size_t size)
 
 // Fake seek - for streams we can only support SEEK_SET to 0 (reset)
 // The MP3 decoder calls fseek(fp, 0, SEEK_SET) to reset position
-// We can't actually seek in a live stream, but we can pretend for the initial check
+// We support seeking back to 0 by replaying saved header bytes
 static int ringbuffer_seek(void* cookie, off_t* offset, int whence)
 {
-    // For a stream, we can only "seek" to report current position
-    // or pretend to seek to start (which we can't actually do)
     if (whence == SEEK_SET && *offset == 0) {
-        // Pretend we're at the start - this allows is_mp3() detection to work
-        // The actual read will get data from wherever the stream currently is
+        // Seek to start - enable header replay mode if we have saved bytes
+        if (s_header_buffer && s_header_bytes_saved > 0) {
+            s_header_replay_mode = true;
+            s_header_read_pos = 0;
+            s_stream_position = 0;
+            mclog::tagInfo(TAG, "Seek to 0: enabling header replay mode ({} bytes saved)", s_header_bytes_saved);
+            return 0;
+        }
+        // No header buffer, just reset position counter
         s_stream_position = 0;
         return 0;
     } else if (whence == SEEK_CUR && *offset == 0) {
@@ -416,6 +538,9 @@ static int ringbuffer_seek(void* cookie, off_t* offset, int whence)
 static int ringbuffer_close(void* cookie)
 {
     s_stream_position = 0;
+    s_header_bytes_saved = 0;
+    s_header_read_pos = 0;
+    s_header_replay_mode = false;
     return 0;
 }
 
@@ -443,10 +568,111 @@ static void audio_decode_task(void* param)
     }
     mclog::tagInfo(TAG, "Prebuffer complete, starting playback");
 
-    // Initialize audio player
+    // Allocate header buffer for seek support FIRST (before audio player starts reading)
+    if (!s_header_buffer) {
+        s_header_buffer = (uint8_t*)heap_caps_malloc(HEADER_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_header_buffer) {
+            s_header_buffer = (uint8_t*)malloc(HEADER_BUFFER_SIZE);
+        }
+    }
+    if (!s_header_buffer) {
+        mclog::tagError(TAG, "Failed to allocate header buffer");
+        s_radio.audioTask = nullptr;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // Scan the prebuffer to find the first valid MP3 frame header
+    // When joining a live stream, we may be in the middle of a frame
+    // MP3 frame header: 0xFF followed by specific bit patterns
+    // See: http://www.mp3-tech.org/programmer/frame_header.html
+    {
+        // Read data from ring buffer to scan for sync
+        size_t available = s_radio.ringBuffer.available();
+        size_t scanSize = (available < HEADER_BUFFER_SIZE) ? available : HEADER_BUFFER_SIZE;
+        size_t bytesRead = s_radio.ringBuffer.read(s_header_buffer, scanSize);
+
+        // Find valid MP3 frame header (need at least 4 bytes for full header)
+        int syncOffset = -1;
+        for (size_t i = 0; i < bytesRead - 3; i++) {
+            uint8_t b0 = s_header_buffer[i];
+            uint8_t b1 = s_header_buffer[i + 1];
+            uint8_t b2 = s_header_buffer[i + 2];
+
+            // Check for sync word: 11 bits set (0xFF followed by 0xE0 or higher)
+            if (b0 != 0xFF || (b1 & 0xE0) != 0xE0) {
+                continue;
+            }
+
+            // Extract and validate header fields
+            // Bits in b1: AAAB BCCD
+            // A = sync (111), B = version (00=2.5, 01=reserved, 10=2, 11=1)
+            // C = layer (00=reserved, 01=III, 10=II, 11=I), D = protection
+            int version = (b1 >> 3) & 0x03;
+            int layer = (b1 >> 1) & 0x03;
+
+            // Skip reserved version (01) and reserved layer (00)
+            if (version == 1 || layer == 0) {
+                continue;
+            }
+
+            // Bits in b2: EEEE FFGH
+            // E = bitrate index (0000 and 1111 are invalid)
+            // F = sample rate index (11 is reserved)
+            int bitrateIdx = (b2 >> 4) & 0x0F;
+            int sampleRateIdx = (b2 >> 2) & 0x03;
+
+            // Skip invalid bitrate (0 = free, 15 = bad) and reserved sample rate
+            if (bitrateIdx == 0 || bitrateIdx == 15 || sampleRateIdx == 3) {
+                continue;
+            }
+
+            // This looks like a valid MP3 frame header!
+            syncOffset = i;
+            mclog::tagInfo(TAG, "Found valid MP3 header at offset {}: {:02X} {:02X} {:02X} {:02X} "
+                          "(v={} l={} br={} sr={})",
+                          i, b0, b1, b2, s_header_buffer[i + 3],
+                          version, layer, bitrateIdx, sampleRateIdx);
+            break;
+        }
+
+        if (syncOffset > 0) {
+            // Move data so sync word is at the beginning
+            mclog::tagInfo(TAG, "Shifting buffer to start at MP3 frame");
+            s_header_bytes_saved = bytesRead - syncOffset;
+            memmove(s_header_buffer, s_header_buffer + syncOffset, s_header_bytes_saved);
+        } else if (syncOffset == 0) {
+            // Sync word already at start
+            mclog::tagInfo(TAG, "MP3 frame already at start of buffer");
+            s_header_bytes_saved = bytesRead;
+        } else {
+            // No valid frame found - log first bytes for debugging
+            mclog::tagWarn(TAG, "No valid MP3 frame in first {} bytes, first 8 bytes: "
+                          "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+                          bytesRead,
+                          s_header_buffer[0], s_header_buffer[1], s_header_buffer[2], s_header_buffer[3],
+                          s_header_buffer[4], s_header_buffer[5], s_header_buffer[6], s_header_buffer[7]);
+            s_header_bytes_saved = bytesRead;
+        }
+    }
+
+    // Initialize the fopencookie state BEFORE creating audio player
+    // Start in replay mode so is_mp3() reads from header buffer
+    s_audio_ring_buffer = &s_radio.ringBuffer;
+    s_stream_position = 0;
+    s_header_read_pos = 0;
+    s_header_replay_mode = true;  // Start in replay mode!
+    s_first_header_read_logged = false;  // Reset logging flag for new stream
+
+    // Initialize audio player - volume is controlled by HAL setSpeakerVolume()
     bsp_codec_config_t* codec_handle = bsp_get_codec_handle();
-    codec_handle->set_volume(_current_volume);
+
+    // Pre-configure I2S to 44100Hz (standard for MP3 radio streams) to avoid
+    // "Mode conflict" error when audio_player tries to reconfigure while running
+    // This sets up the codec before playback starts
+    mclog::tagInfo(TAG, "Pre-configuring I2S for 44100Hz stereo");
     codec_handle->i2s_reconfig_clk_fn(44100, 16, I2S_SLOT_MODE_STEREO);
+    // The MP3 decoder will call clk_set_fn with the correct sample rate from the stream
 
     audio_player_config_t config = {
         .mute_fn    = audio_mute_function,
@@ -465,8 +691,6 @@ static void audio_decode_task(void* param)
 
     // Create custom FILE from ring buffer using fopencookie
     // We provide a seek function so is_mp3() detection works
-    s_audio_ring_buffer = &s_radio.ringBuffer;
-    s_stream_position = 0;
     cookie_io_functions_t io_funcs = {
         .read  = ringbuffer_read,
         .write = nullptr,
@@ -483,6 +707,7 @@ static void audio_decode_task(void* param)
     }
 
     // Start playback
+    mclog::tagInfo(TAG, "Calling audio_player_play with {} bytes in header buffer", s_header_bytes_saved);
     ret = audio_player_play(stream_fp);
     if (ret != ESP_OK) {
         mclog::tagError(TAG, "Failed to start playback: {}", esp_err_to_name(ret));
@@ -493,13 +718,34 @@ static void audio_decode_task(void* param)
         return;
     }
 
+    // Give the audio player's internal task time to start and begin decoding
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Check if playback actually started
+    audio_player_state_t initial_state = audio_player_get_state();
+    mclog::tagInfo(TAG, "After 500ms delay, player state: {}", (int)initial_state);
+
     // Wait for stop signal or idle state
+    // Also monitor buffer health and HTTP task status
+    uint32_t lastStatusLog = 0;
     while (!s_radio.stopRequested) {
         audio_player_state_t state = audio_player_get_state();
         if (state == AUDIO_PLAYER_STATE_IDLE) {
             mclog::tagInfo(TAG, "Audio player became idle");
             break;
         }
+
+        // Log status every 5 seconds
+        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        if ((now - lastStatusLog) > 5000) {
+            size_t bufferBytes = s_radio.ringBuffer.available();
+            int bufferPct = s_radio.ringBuffer.bufferPercent();
+            bool httpRunning = (s_radio.httpTask != nullptr);
+            mclog::tagInfo(TAG, "Status: buffer={}KB ({}%), HTTP task={}, player state={}",
+                          bufferBytes / 1024, bufferPct, httpRunning ? "running" : "stopped", (int)state);
+            lastStatusLog = now;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
@@ -564,8 +810,9 @@ bool HalEsp32::startRadioStream(const std::string& url)
     }
     s_radio.ringBuffer.reset();
 
-    // Set state
+    // Set state - increment stream ID to invalidate old HTTP tasks
     if (xSemaphoreTake(s_radio.mutex, portMAX_DELAY)) {
+        s_radio.streamId++;  // New stream, old HTTP tasks will be ignored
         s_radio.currentUrl     = url;
         s_radio.state          = RADIO_BUFFERING;
         s_radio.stopRequested  = false;
@@ -577,6 +824,7 @@ bool HalEsp32::startRadioStream(const std::string& url)
         radioMetadata.station  = "";
         radioMetadata.bufferPercent = 0;
         memset(s_radio.spectrum, 0, sizeof(s_radio.spectrum));
+        mclog::tagInfo(TAG, "Starting stream #{}", s_radio.streamId);
         xSemaphoreGive(s_radio.mutex);
     }
 

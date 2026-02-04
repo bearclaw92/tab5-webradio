@@ -23,6 +23,12 @@ void HalEsp32::setSpeakerVolume(uint8_t volume)
 {
     _current_speaker_volume = std::clamp((int)volume, 0, 100);
     mclog::tagInfo(TAG, "set speaker volume: {}%", _current_speaker_volume);
+
+    // Apply volume immediately to codec (for radio streaming)
+    bsp_codec_config_t* codec_handle = bsp_get_codec_handle();
+    if (codec_handle) {
+        codec_handle->set_volume(_current_speaker_volume);
+    }
 }
 
 uint8_t HalEsp32::getSpeakerVolume()

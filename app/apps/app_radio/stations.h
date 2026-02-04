@@ -80,20 +80,6 @@ static const Station STATIONS[] = {
         "http://ice1.somafm.com/bootliquor-128-mp3",
         0x8B4513  // Saddle brown
     },
-    {
-        "thetrip",
-        "The Trip",
-        "Progressive House",
-        "http://ice1.somafm.com/thetrip-128-mp3",
-        0xFF4500  // Orange red
-    },
-    {
-        "cliqhop",
-        "cliqhop idm",
-        "IDM/Glitch",
-        "http://ice1.somafm.com/cliqhop-128-mp3",
-        0x9400D3  // Dark violet
-    },
 };
 
 static const int STATION_COUNT = sizeof(STATIONS) / sizeof(STATIONS[0]);

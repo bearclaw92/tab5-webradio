@@ -180,30 +180,35 @@ void RadioView::create_now_playing_card()
 
 void RadioView::create_station_grid()
 {
-    // Station grid container - horizontal scrollable row
-    // Screen is 1280x720. Now playing card ends at y=250, transport starts at y=640
+    // Station grid container - 4x2 grid of station cards
+    // Screen is 1280x720. Now playing card ends at y=250, transport starts at y=630
     // Available space for stations: y=260 to y=620 = 360px
     _station_grid = std::make_unique<Container>(_root->get());
     _station_grid->setPos(20, 260);
-    _station_grid->setSize(1240, 350);  // Almost full width
+    _station_grid->setSize(1240, 360);  // Height for 2 rows of 170px cards + gaps
     _station_grid->setBgColor(lv_color_hex(colors::BG_PRIMARY));
     _station_grid->setBorderWidth(0);
     _station_grid->setScrollbarMode(LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_layout(_station_grid->get(), LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(_station_grid->get(), LV_FLEX_FLOW_ROW_WRAP);  // Wrap to multiple rows
-    lv_obj_set_flex_align(_station_grid->get(), LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_flex_align(_station_grid->get(), LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_gap(_station_grid->get(), 10, 0);
-    lv_obj_set_style_pad_row(_station_grid->get(), 10, 0);
+    lv_obj_set_style_pad_row(_station_grid->get(), 15, 0);
+    lv_obj_set_style_pad_all(_station_grid->get(), 0, 0);  // No internal padding
     lv_obj_clear_flag(_station_grid->get(), LV_OBJ_FLAG_SCROLLABLE);
 
-    // Create station cards - 4 stations per row, 2 rows (1240 / 4 = 310, minus gaps)
+    // Create station cards - 4 stations per row, 2 rows = 8 total
+    // Grid is 1240px wide: (1240 - 30 gaps) / 4 = ~302px per card, use 300px
+    // Grid is 360px tall: 2 rows * 170px + 15px gap = 355px
     for (int i = 0; i < radio::STATION_COUNT; i++) {
         auto card = std::make_unique<Container>(_station_grid->get());
-        card->setSize(295, 160);  // Taller cards to fit text with spacing
+        card->setSize(300, 170);  // Slightly taller for better spacing
         card->setBgColor(lv_color_hex(colors::BG_SECONDARY));
         card->setRadius(12);
         card->setBorderWidth(2);
         card->setBorderColor(lv_color_hex(colors::BG_TERTIARY));
+        // Disable scrolling on individual cards
+        lv_obj_clear_flag(card->get(), LV_OBJ_FLAG_SCROLLABLE);
 
         // Station name label (at top with padding)
         auto name_label = lv_label_create(card->get());
